@@ -43,7 +43,21 @@ interface RegistryLike {
 interface ExtCtx {
   models?: ModelsApi;
   modelRegistry?: RegistryLike;
+  sessionManager?: SessionManagerLike;
   ui: { notify(msg: string, level: string): void };
+}
+
+/** Subset of a session-transcript entry: enough to spot turn boundaries. */
+interface EntryLike {
+  type?: string;
+  customType?: string;
+  attribution?: string;
+  message?: { role?: string; stopReason?: string };
+}
+
+/** Subset of OMP SessionManager: read-only current-branch access. */
+interface SessionManagerLike {
+  getBranch?(): EntryLike[];
 }
 
 // ── Domain types ─────────────────────────────────────────────────────────
@@ -206,6 +220,19 @@ export default function claudish(pi: ExtensionAPI) {
     } else {
       return;
     }
+
+    // Rewrite only the terminal message of a user-initiated turn. An agent-
+    // initiated follow-up — an advisor note, a stop-hook continuation, any
+    // agent-injected steer that lands on an already-finished answer and spawns
+    // a bonus turn — is skipped: rewriting it is noise, and letting it fall
+    // through would abort the pending rewrite of the answer that preceded it,
+    // leaving only the follow-up. The single pending-rewrite slot is therefore
+    // only ever cancelled/replaced by a genuine new user turn.
+    const sm = ctx && typeof ctx === "object" && "sessionManager" in ctx
+      ? (ctx as { sessionManager?: SessionManagerLike }).sessionManager
+      : undefined;
+    const branch = sm?.getBranch?.();
+    if (Array.isArray(branch) && isAgentFollowUpTurn(branch)) return;
 
     lastOriginal = fullText;
 
@@ -438,6 +465,55 @@ function modelLabel(m: ModelRef): string {
 
 function isStyle(v: unknown): v is Style {
   return v === "default" || v === "tldr" || v === "5y" || v === "caveman";
+}
+
+/**
+ * True when the latest turn was initiated by the agent/host rather than the
+ * user, as a bonus turn spawned on top of an already-complete answer — an
+ * advisor note the agent acknowledges, a stop-hook continuation, or any other
+ * agent-injected steer that lands after a finished answer.
+ *
+ * Detection walks the current branch back from the leaf, decoupled from any one
+ * subsystem: it skips the turn's own assistant/tool/state entries and the
+ * display-only rewrites we appended, then classifies what triggered the turn.
+ * A user `message` or a user-attributed injection means a genuine user turn. An
+ * agent-attributed injected message is a follow-up only when (2) the entry it
+ * landed on is itself a completed assistant answer (`stopReason` "stop"). That
+ * second condition separates an after-the-fact follow-up from an agent steer
+ * (e.g. an advisor `concern`/`blocker`) that reshaped an in-flight user turn —
+ * the latter still yields a real answer worth rewriting.
+ */
+function isAgentFollowUpTurn(branch: EntryLike[]): boolean {
+  let i = branch.length - 1;
+  for (; i >= 0; i--) {
+    const e = branch[i];
+    if (!e || typeof e !== "object") continue;
+    if (e.type === "message") {
+      if (e.message?.role === "user") return false; // genuine user turn
+      continue; // assistant / toolResult: part of the current turn
+    }
+    if (e.type === "custom_message") {
+      if (e.customType === CUSTOM_TYPE) continue; // our own display rewrite
+      if (e.attribution === "user") return false; // user-injected prompt
+      break; // agent-injected message (advisor note, etc.) triggered this turn
+    }
+    // custom markers and *_change entries: turn scaffolding, keep walking.
+  }
+  if (i < 0) return false;
+
+  for (let j = i - 1; j >= 0; j--) {
+    const e = branch[j];
+    if (!e || typeof e !== "object") continue;
+    if (e.type === "custom_message") {
+      if (e.attribution !== "user") continue; // stacked agent injections / rewrites
+      return false; // a user injection is the real trigger
+    }
+    if (e.type === "message") {
+      if (e.message?.role === "assistant") return e.message?.stopReason === "stop";
+      return false; // toolResult / user before an assistant: mid-turn steer
+    }
+  }
+  return false;
 }
 
 function extractText(content: unknown): string {
