@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-09-02
+
+### Fixed
+
+- Agent-initiated follow-up turns no longer clobber the rewrite. Only the
+  terminal message of a user-initiated turn is rewritten; a bonus turn the
+  agent/host spawns on top of an already-finished answer — an advisor note the
+  agent acknowledges, a stop-hook continuation, or any agent-injected steer that
+  lands after a completed answer — is detected from the session branch and
+  skipped. It is no longer rewritten, and it no longer aborts the pending
+  rewrite of the answer that preceded it. The single pending-rewrite slot is
+  therefore only ever cancelled by a genuine new user turn. An agent steer that
+  reshapes an *in-flight* user turn still yields a real answer and is rewritten.
+
 ## [0.1.0] - 2026-09-02
 
 Initial release — a TypeScript port of the
