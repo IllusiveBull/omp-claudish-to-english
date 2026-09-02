@@ -1,0 +1,16 @@
+{
+  "name": "omp-claudish-to-english",
+  "version": "0.1.0",
+  "description": "Plain-language rewrite of assistant messages — OMP extension on OMP's native providers, zero API-key setup (subscription & OAuth auth included)",
+  "license": "MIT",
+  "author": "IllusiveBull",
+  "keywords": ["omp", "oh-my-pi", "omp-extension", "claudish", "plain-language", "tldr", "eli5"],
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-ai": "^18.1.2",
+    "@oh-my-pi/pi-coding-agent": "^18.1.2",
+    "bun-types": "^1.4.0"
+  }
+}
