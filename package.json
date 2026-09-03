@@ -1,6 +1,6 @@
 {
   "name": "omp-claudish-to-english",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Plain-language rewrite of assistant messages — OMP extension on OMP's native providers, zero API-key setup (subscription & OAuth auth included)",
   "license": "MIT",
   "author": "IllusiveBull",

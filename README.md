@@ -88,7 +88,7 @@ Settings last for one session. Use the environment variables below for lasting d
 
 ## How it works
 
-1. `message_end` fires for each assistant message. Messages that carry tool calls are skipped — more work is coming. Only the terminal message of a **user-initiated** turn counts. A bonus turn the agent or host spawns on top of an already-finished answer — an advisor note the agent acknowledges, a stop-hook continuation, or any agent-injected steer landing after a completed answer — is detected from the session branch and skipped, so it never replaces the rewrite of the real answer.
+1. `message_end` fires for each assistant message. Messages that carry tool calls are skipped — more work is coming. The terminal message of a **user-initiated** turn is rewritten. A bonus turn the agent or host spawns on top of an already-finished answer — an advisor note the agent acknowledges, a stop-hook continuation, or any agent-injected steer landing after a completed answer — is detected from the session branch and folded into the answer's pending rewrite, so the single plain-language block reflects the final position (a follow-up may confirm the answer or reverse it). If the answer's rewrite has already been appended, the follow-up is rewritten on its own; short acknowledgements fall under the length gate and produce nothing.
 2. Fenced code blocks are stripped, then non-whitespace characters are counted. Messages under the `min` limit are ignored.
 3. A rewrite model is picked, cheapest first:
    1. the explicit `/claudish model` spec, if set;

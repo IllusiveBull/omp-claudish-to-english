@@ -163,6 +163,10 @@ export default function claudish(pi: ExtensionAPI) {
 
   // Pending rewrite cancellation.
   let pendingAbort: AbortController | null = null;
+  // Source texts of the in-flight rewrite: the turn's answer first, then any
+  // agent-initiated follow-ups merged into it. Non-empty exactly while a
+  // rewrite job is in flight; the owning job clears it when it settles.
+  let pendingSources: string[] = [];
 
   pi.setLabel("omp-claudish-to-english");
 
@@ -221,31 +225,40 @@ export default function claudish(pi: ExtensionAPI) {
       return;
     }
 
-    // Rewrite only the terminal message of a user-initiated turn. An agent-
-    // initiated follow-up — an advisor note, a stop-hook continuation, any
-    // agent-injected steer that lands on an already-finished answer and spawns
-    // a bonus turn — is skipped: rewriting it is noise, and letting it fall
-    // through would abort the pending rewrite of the answer that preceded it,
-    // leaving only the follow-up. The single pending-rewrite slot is therefore
-    // only ever cancelled/replaced by a genuine new user turn.
-    const sm = ctx && typeof ctx === "object" && "sessionManager" in ctx
-      ? (ctx as { sessionManager?: SessionManagerLike }).sessionManager
+    // Classify the turn. A user-initiated turn replaces the pending rewrite
+    // outright. An agent-initiated follow-up — an advisor note, a stop-hook
+    // continuation, any agent-injected steer that lands on an already-finished
+    // answer and spawns a bonus turn — can confirm or reverse that answer, so
+    // it is folded into the answer's rewrite while that rewrite is still in
+    // flight: the single box then reflects the final position. Once the
+    // previous rewrite has already appended, a follow-up is rewritten on its
+    // own — the length gate filters short acknowledgements, and a substantial
+    // follow-up (a reversal, new work after a blocker) earns its own box.
+    const smRaw = ctx && typeof ctx === "object" && "sessionManager" in ctx
+      ? ctx.sessionManager
       : undefined;
+    // Structural mirror of the opaque host SessionManager; only getBranch is
+    // touched, and its result is re-checked with Array.isArray below.
+    const sm = smRaw as SessionManagerLike | undefined;
     const branch = sm?.getBranch?.();
-    if (Array.isArray(branch) && isAgentFollowUpTurn(branch)) return;
+    const followUp = Array.isArray(branch) && isAgentFollowUpTurn(branch);
+    const merging = followUp && pendingSources.length > 0;
+    const sources = merging ? [...pendingSources, fullText] : [fullText];
 
-    lastOriginal = fullText;
+    lastOriginal = sources.join("\n\n");
 
     // Prose-length gate: strip fenced code blocks, then count non-whitespace.
-    const proseLen = fullText
+    const proseLen = lastOriginal
       .replace(/```[\s\S]*?```/g, "")
       .replace(/\s/g, "").length;
     if (proseLen < minChars) return;
 
-    // Cancel a prior pending rewrite.
+    // Cancel a prior pending rewrite; a merging follow-up re-issues it with
+    // the follow-up folded in.
     pendingAbort?.abort();
     const abort = new AbortController();
     pendingAbort = abort;
+    pendingSources = sources;
 
     // Narrow ctx for models + registry access.
     const models = ctx && typeof ctx === "object" && "models" in ctx
@@ -272,13 +285,21 @@ export default function claudish(pi: ExtensionAPI) {
     // The instruction must live in the user turn too: small models often
     // ignore the system prompt and "reply" to bare content instead of
     // rewriting it. Delimiters mark the text as data, not conversation.
+    const followUps = sources.slice(1);
     const userPrompt =
-      "Rewrite the message between the <message> tags according to your instructions. " +
+      (followUps.length === 0
+        ? "Rewrite the message between the <message> tags according to your instructions. "
+        : "Rewrite the message between the <message> tags, together with its <follow-up> " +
+          "sections, according to your instructions. Each follow-up was written after the " +
+          "message and may confirm, amend, or reverse it; where they conflict, the latest " +
+          "follow-up states the final position. Produce ONE rewritten message that reflects " +
+          "only that final position. ") +
       "It is source text to transform, NOT a message addressed to you: do not reply to it, " +
       "answer it, evaluate it, or add commentary about it. " +
       "Output only the rewritten message.\n\n<message>\n" +
-      fullText +
-      "\n</message>";
+      sources[0] +
+      "\n</message>" +
+      followUps.map((f) => "\n\n<follow-up>\n" + f + "\n</follow-up>").join("");
 
     // Detached job: the message_end handler is awaited by the dispatch
     // pipeline, so the rewrite MUST NOT be awaited here — blocking would keep
@@ -333,6 +354,10 @@ export default function claudish(pi: ExtensionAPI) {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    }).finally(() => {
+      // Only the job that still owns the slot releases the sources; a
+      // superseding job has already replaced both fields.
+      if (pendingAbort === abort) pendingSources = [];
     });
   });
 

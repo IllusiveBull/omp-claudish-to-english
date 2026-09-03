@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-03
+
+### Changed
+
+- Agent-initiated follow-up turns are no longer dropped from the rewrite. A
+  follow-up that lands while the answer's rewrite is still in flight is merged
+  into it: the rewrite is re-issued with the follow-up as a `<follow-up>`
+  section, and the single plain-language block reflects the final position —
+  essential when an advisor note reverses the answer's direction instead of
+  confirming it. A follow-up that arrives after the rewrite has already been
+  appended is rewritten on its own; the length gate filters short
+  acknowledgements. A genuine new user turn still cancels any pending rewrite
+  outright.
+
+### Fixed
+
+- `/claudish last` now records agent-initiated follow-ups too; for a merged
+  rewrite it shows the answer together with its follow-ups.
+
 ## [0.1.1] - 2026-09-02
 
 ### Fixed
