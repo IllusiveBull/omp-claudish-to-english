@@ -94,7 +94,7 @@ Settings last for one session. Use the environment variables below for lasting d
    1. the explicit `/claudish model` spec, if set;
    2. the host's `@tiny`, then `@smol` role aliases (skipping the session's own model);
    3. the session's own model — it is always authenticated.
-4. The completion runs in the background with a 45 s timeout, through the host pipeline. OMP itself handles provider auth (OAuth refresh, token exchange, custom headers). A newer message cancels any rewrite still in flight.
+4. The completion includes the user's latest question (up to 800 characters) as context to resolve pronouns and keep the rewrite on-topic. It runs in the background with a 45 s timeout, through the host pipeline. OMP itself handles provider auth (OAuth refresh, token exchange, custom headers). A newer message cancels any rewrite still in flight.
 5. The rewrite waits for the session to go idle (up to 20 s). Then it is added as a custom transcript message (`claudish-rewrite`, `triggerTurn: false`). If you already started a new turn, it is dropped instead.
 6. A `context` filter removes `claudish-rewrite` messages from everything sent to the LLM.
 
@@ -102,8 +102,8 @@ Settings last for one session. Use the environment variables below for lasting d
 
 ```sh
 bun install          # dev-only type packages; not needed to run
+bun test             # run unit tests
 bun x tsc --noEmit   # type-check
-```
 
 The extension is one file, `src/index.ts`. It declares small structural types for the OMP runtime objects it touches, instead of depending on internal host types. That way it keeps loading across host versions.
 

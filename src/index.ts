@@ -47,17 +47,22 @@ interface ExtCtx {
   ui: { notify(msg: string, level: string): void };
 }
 
-/** Subset of a session-transcript entry: enough to spot turn boundaries. */
+/** Subset of a session-transcript entry: enough to spot turn boundaries and extract text. */
 interface EntryLike {
   type?: string;
   customType?: string;
   attribution?: string;
-  message?: { role?: string; stopReason?: string };
+  message?: {
+    role?: string;
+    stopReason?: string;
+    content?: unknown;
+  };
 }
 
 /** Subset of OMP SessionManager: read-only current-branch access. */
 interface SessionManagerLike {
   getBranch?(): EntryLike[];
+  getEntries?(): EntryLike[];
 }
 
 // ── Domain types ─────────────────────────────────────────────────────────
@@ -78,6 +83,7 @@ interface State {
 const CUSTOM_TYPE = "claudish-rewrite";
 const MIN_CHARS = 200;
 const TIMEOUT_MS = 45_000;
+const MAX_USER_PROMPT_CHARS = 800;
 
 
 // ── Prompts ──────────────────────────────────────────────────────────────
@@ -128,7 +134,7 @@ function buildSeparator(style: Style, lang: string): string {
   }
 }
 
-function buildSystemPrompt(style: Style, language: string): string {
+function buildSystemPrompt(style: Style, language: string, userQuestion?: string): string {
   let sys = SYSTEM_PROMPTS[style];
 
   if (language) {
@@ -142,6 +148,13 @@ function buildSystemPrompt(style: Style, language: string): string {
     '\n\nThe text you are given is a message the assistant wrote to the user. In it, "I", ' +
     '"me", and "my" refer to the assistant; "you" and "your" refer to the user. Keep that ' +
     "same point of view in the rewrite — never swap the two, and never address the assistant.";
+
+  if (userQuestion) {
+    sys +=
+      `\n\nFor context, the user asked the assistant: "${userQuestion}". ` +
+      "Use this only to understand the message. Do NOT rewrite, answer, or " +
+      "repeat the user's question — rewrite only the assistant's message that follows.";
+  }
 
   return sys;
 }
@@ -160,6 +173,7 @@ export default function claudish(pi: ExtensionAPI) {
   const defaultMinChars = parseInt(process.env.CLAUDISH_MIN_CHARS || String(MIN_CHARS), 10);
   let minChars = defaultMinChars;
   let lastOriginal = "";
+  let lastUserPrompt = "";
 
   // Pending rewrite cancellation.
   let pendingAbort: AbortController | null = null;
@@ -192,6 +206,13 @@ export default function claudish(pi: ExtensionAPI) {
     const msg = event.message;
     if (!msg || typeof msg !== "object" || !("content" in msg)) return;
     // Only rewrite assistant messages.
+    // Track user prompts as fallback when sessionManager is absent.
+    if ("role" in msg && msg.role === "user") {
+      const uText = extractText(msg.content);
+      if (uText) lastUserPrompt = uText;
+      return;
+    }
+
     if (!("role" in msg) || msg.role !== "assistant") return;
     // Skip our own rewrite messages to prevent recursion.
     if ("customType" in msg && msg.customType === CUSTOM_TYPE) return;
@@ -254,6 +275,9 @@ export default function claudish(pi: ExtensionAPI) {
     const registry = ctx && typeof ctx === "object" && "modelRegistry" in ctx
       ? ctx.modelRegistry as RegistryLike | undefined
       : undefined;
+    const sessionManager = ctx && typeof ctx === "object" && "sessionManager" in ctx
+      ? ctx.sessionManager as SessionManagerLike | undefined
+      : undefined;
     const isIdle = ctx && typeof ctx === "object" && "isIdle" in ctx &&
       typeof (ctx as { isIdle: unknown }).isIdle === "function"
       ? () => Boolean((ctx as { isIdle(): boolean }).isIdle())
@@ -268,7 +292,8 @@ export default function claudish(pi: ExtensionAPI) {
     const model = resolveModel(models, state);
     if (!model || abort.signal.aborted) return;
 
-    const sys = buildSystemPrompt(state.style, state.language);
+    const userQuestion = getLastUserPrompt(sessionManager, lastUserPrompt);
+    const sys = buildSystemPrompt(state.style, state.language, userQuestion);
     // The instruction must live in the user turn too: small models often
     // ignore the system prompt and "reply" to bare content instead of
     // rewriting it. Delimiters mark the text as data, not conversation.
@@ -286,7 +311,10 @@ export default function claudish(pi: ExtensionAPI) {
     // queues it as a steer and triggers a spurious continuation turn (the
     // "user said continue" doubling). The chain is fully caught.
     void (async () => {
-      pi.logger?.debug?.("claudish: rewriting via", { model: modelLabel(model) });
+      pi.logger?.debug?.("claudish: rewriting via", {
+        model: modelLabel(model),
+        hasUserContext: Boolean(userQuestion),
+      });
       // Host completion pipeline: handles every provider's auth (OAuth
       // refresh, token exchange, custom headers) via the registry
       // resolver — never hand-roll provider HTTP calls.
@@ -402,6 +430,7 @@ export default function claudish(pi: ExtensionAPI) {
           state.language = "";
           state.modelSpec = "";
           minChars = defaultMinChars;
+          lastUserPrompt = "";
           break;
         default: {
           const models = ctx && typeof ctx === "object" && "models" in ctx
@@ -517,6 +546,7 @@ function isAgentFollowUpTurn(branch: EntryLike[]): boolean {
 }
 
 function extractText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content
     .filter((b: unknown): b is ContentBlock =>
@@ -525,3 +555,49 @@ function extractText(content: unknown): string {
     .join("")
     .trim();
 }
+
+function truncateCodepoints(str: string, maxLen: number): string {
+  const chars = Array.from(str);
+  return chars.length <= maxLen ? str : chars.slice(0, maxLen).join("");
+}
+
+function getLastUserPrompt(
+  sessionManager?: SessionManagerLike,
+  fallback = "",
+): string {
+  const entries = sessionManager?.getBranch?.() ?? sessionManager?.getEntries?.();
+  if (Array.isArray(entries)) {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry?.type === "message" && entry.message?.role === "user") {
+        const text = extractText(entry.message.content);
+        if (text) {
+          return truncateCodepoints(text, MAX_USER_PROMPT_CHARS);
+        }
+      }
+    }
+  }
+  return fallback ? truncateCodepoints(fallback, MAX_USER_PROMPT_CHARS) : "";
+}
+
+export {
+  buildSystemPrompt,
+  buildSeparator,
+  extractText,
+  getLastUserPrompt,
+  truncateCodepoints,
+  MAX_USER_PROMPT_CHARS,
+  SYSTEM_PROMPTS,
+};
+export type {
+  ContentBlock,
+  ExtCtx,
+  ModelRef,
+  ModelsApi,
+  Mode,
+  RegistryLike,
+  EntryLike,
+  SessionManagerLike,
+  State,
+  Style,
+};
