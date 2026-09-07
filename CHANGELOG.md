@@ -18,11 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appended is rewritten on its own; the length gate filters short
   acknowledgements. A genuine new user turn still cancels any pending rewrite
   outright.
-
-### Fixed
-
-- `/claudish last` now records agent-initiated follow-ups too; for a merged
-  rewrite it shows the answer together with its follow-ups.
+- `/claudish last` now shows the rewrite of the last assistant message under
+  the *current* settings instead of echoing the original text. If style,
+  language, or model changed since the rewrite was displayed — e.g.
+  `/claudish language Japanese` then `/claudish last` — the message is
+  rewritten anew; otherwise the existing rewrite is replayed without another
+  model call. The explicit request also bypasses the `min` length gate, so a
+  message that was too short to be rewritten automatically can be rewritten on
+  demand. The original text is always in the transcript already.
+- `/claudish last` records agent-initiated follow-ups too: a rewrite of a
+  merged answer is re-issued with its `<follow-up>` sections intact.
 
 ## [0.1.1] - 2026-09-02
 

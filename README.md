@@ -71,7 +71,7 @@ Everything is controlled with the `/claudish` slash command:
 | `/claudish language <name>` | Rewrite in that language (empty = same language as the original message) |
 | `/claudish model <spec>` | Pin the rewrite model (e.g. `openai/gpt-4.1-mini` or a role alias like `@slow`) |
 | `/claudish min <chars>` | How long a message must be before it gets rewritten (non-whitespace chars, code blocks not counted) |
-| `/claudish last` | Show the last original (pre-rewrite) assistant message again |
+| `/claudish last` | Show the rewrite of the last assistant message with the current settings. Replays it if nothing changed; if you switched style/language/model since — or the message was too short to be rewritten automatically — it is rewritten anew |
 | `/claudish reset` | Put all settings back to their defaults |
 
 Settings last for one session. Use the environment variables below for lasting defaults.
