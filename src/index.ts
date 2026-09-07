@@ -159,7 +159,14 @@ export default function claudish(pi: ExtensionAPI) {
 
   const defaultMinChars = parseInt(process.env.CLAUDISH_MIN_CHARS || String(MIN_CHARS), 10);
   let minChars = defaultMinChars;
+  /** Last rewritable assistant message (terminal message of a user turn). */
   let lastOriginal = "";
+  /**
+   * Rewrite of `lastOriginal` that was actually displayed, plus the settings
+   * snapshot that produced it. Null when `lastOriginal` was never rewritten
+   * (below the length gate, aborted, or errored).
+   */
+  let lastRewrite: { text: string; key: string } | null = null;
 
   // Pending rewrite cancellation.
   let pendingAbort: AbortController | null = null;
@@ -235,6 +242,7 @@ export default function claudish(pi: ExtensionAPI) {
     if (Array.isArray(branch) && isAgentFollowUpTurn(branch)) return;
 
     lastOriginal = fullText;
+    lastRewrite = null;
 
     // Prose-length gate: strip fenced code blocks, then count non-whitespace.
     const proseLen = fullText
@@ -242,98 +250,10 @@ export default function claudish(pi: ExtensionAPI) {
       .replace(/\s/g, "").length;
     if (proseLen < minChars) return;
 
-    // Cancel a prior pending rewrite.
-    pendingAbort?.abort();
-    const abort = new AbortController();
-    pendingAbort = abort;
+    const host = narrowHost(ctx);
+    if (!host) return;
 
-    // Narrow ctx for models + registry access.
-    const models = ctx && typeof ctx === "object" && "models" in ctx
-      ? ctx.models as ModelsApi | undefined
-      : undefined;
-    const registry = ctx && typeof ctx === "object" && "modelRegistry" in ctx
-      ? ctx.modelRegistry as RegistryLike | undefined
-      : undefined;
-    const isIdle = ctx && typeof ctx === "object" && "isIdle" in ctx &&
-      typeof (ctx as { isIdle: unknown }).isIdle === "function"
-      ? () => Boolean((ctx as { isIdle(): boolean }).isIdle())
-      : () => true;
-    const hasPending = ctx && typeof ctx === "object" && "hasPendingMessages" in ctx &&
-      typeof (ctx as { hasPendingMessages: unknown }).hasPendingMessages === "function"
-      ? () => Boolean((ctx as { hasPendingMessages(): boolean }).hasPendingMessages())
-      : () => false;
-    if (!models || !registry?.resolver) return;
-    const resolver = registry.resolver.bind(registry);
-
-    const model = resolveModel(models, state);
-    if (!model || abort.signal.aborted) return;
-
-    const sys = buildSystemPrompt(state.style, state.language);
-    // The instruction must live in the user turn too: small models often
-    // ignore the system prompt and "reply" to bare content instead of
-    // rewriting it. Delimiters mark the text as data, not conversation.
-    const userPrompt =
-      "Rewrite the message between the <message> tags according to your instructions. " +
-      "It is source text to transform, NOT a message addressed to you: do not reply to it, " +
-      "answer it, evaluate it, or add commentary about it. " +
-      "Output only the rewritten message.\n\n<message>\n" +
-      fullText +
-      "\n</message>";
-
-    // Detached job: the message_end handler is awaited by the dispatch
-    // pipeline, so the rewrite MUST NOT be awaited here — blocking would keep
-    // the run from settling, and appending a message while the run is active
-    // queues it as a steer and triggers a spurious continuation turn (the
-    // "user said continue" doubling). The chain is fully caught.
-    void (async () => {
-      pi.logger?.debug?.("claudish: rewriting via", { model: modelLabel(model) });
-      // Host completion pipeline: handles every provider's auth (OAuth
-      // refresh, token exchange, custom headers) via the registry
-      // resolver — never hand-roll provider HTTP calls.
-      const response = await completeSimple(
-        model as unknown as Parameters<typeof completeSimple>[0],
-        {
-          systemPrompt: [sys],
-          messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
-        },
-        {
-          apiKey: resolver(model) as string | undefined,
-          maxTokens: 4096,
-          disableReasoning: true,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(TIMEOUT_MS)]),
-        },
-      );
-      if (abort.signal.aborted) return;
-      if (response?.stopReason === "error") {
-        pi.logger?.debug?.("claudish: rewrite errored", { error: response.errorMessage });
-        return;
-      }
-      const rewrite = extractText(response?.content);
-      if (!rewrite) return;
-
-      // Append only once the session is idle: at idle, triggerTurn:false is a
-      // pure transcript append (no turn, no steer queue). If the user has
-      // already started a new turn, drop the rewrite rather than risk
-      // injecting into it.
-      for (let waited = 0; (!isIdle() || hasPending()) && waited < 20_000; waited += 200) {
-        await new Promise((r) => setTimeout(r, 200));
-        if (abort.signal.aborted) return;
-      }
-      if (!isIdle() || hasPending()) return;
-
-      const sep = buildSeparator(state.style, state.language);
-      pi.sendMessage(
-        { customType: CUSTOM_TYPE, content: sep + rewrite, display: true },
-        { triggerTurn: false },
-      );
-    })().catch((error: unknown) => {
-      // Fail open — but leave a trace for debugging.
-      if (!abort.signal.aborted) {
-        pi.logger?.debug?.("claudish: rewrite failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    });
+    startRewrite(fullText, host);
   });
 
   // ── /claudish command ─────────────────────────────────────────────────
@@ -381,21 +301,31 @@ export default function claudish(pi: ExtensionAPI) {
         case "model":
           state.modelSpec = rest;
           break;
-        case "last":
-          if (lastOriginal) {
-            pi.sendMessage(
-              {
-                customType: CUSTOM_TYPE,
-                content:
-                  "\n\n────────────────────────\n📄 **Original message**:\n\n" + lastOriginal,
-                display: true,
-              },
-              { triggerTurn: false },
-            );
-          } else {
+        case "last": {
+          if (!lastOriginal) {
             ui.notify("No previous message recorded.", "warn");
+            return;
           }
+          // Settings unchanged since the displayed rewrite → replay it. Any
+          // change (style, language, model) or a message that never got a
+          // rewrite (length gate, abort, error) → rewrite now with the current
+          // settings. The explicit request bypasses the length gate.
+          if (lastRewrite && lastRewrite.key === settingsKey()) {
+            showRewrite(lastRewrite.text, state.style, state.language);
+            return;
+          }
+          const host = narrowHost(ctx);
+          if (!host) {
+            ui.notify("claudish: no model available for rewriting.", "warn");
+            return;
+          }
+          startRewrite(lastOriginal, host);
+          ui.notify(
+            `claudish: rewriting last message · style: ${state.style} · lang: ${state.language || "auto"}`,
+            "info",
+          );
           return;
+        }
         case "reset":
           state.mode = "append";
           state.style = "default";
@@ -430,6 +360,131 @@ export default function claudish(pi: ExtensionAPI) {
   });
 
   // ── Internal helpers ──────────────────────────────────────────────────
+
+  /** Host surfaces a rewrite needs, narrowed from an opaque hook/command ctx. */
+  interface RewriteHost {
+    models: ModelsApi;
+    resolver: (model: ModelRef, sessionId?: string) => unknown;
+    isIdle: () => boolean;
+    hasPending: () => boolean;
+  }
+
+  function narrowHost(ctx: unknown): RewriteHost | undefined {
+    if (!ctx || typeof ctx !== "object") return undefined;
+    const models = "models" in ctx ? ctx.models as ModelsApi | undefined : undefined;
+    const registry = "modelRegistry" in ctx ? ctx.modelRegistry as RegistryLike | undefined : undefined;
+    if (!models || !registry?.resolver) return undefined;
+    return {
+      models,
+      resolver: registry.resolver.bind(registry),
+      isIdle: boolMethod(ctx, "isIdle") ?? (() => true),
+      hasPending: boolMethod(ctx, "hasPendingMessages") ?? (() => false),
+    };
+  }
+
+  /** Bound zero-arg method of `obj` coerced to boolean, if present. */
+  function boolMethod(obj: object, name: string): (() => boolean) | undefined {
+    if (!(name in obj)) return undefined;
+    const fn: unknown = obj[name as keyof typeof obj];
+    if (typeof fn !== "function") return undefined;
+    return () => Boolean(fn.call(obj));
+  }
+
+  /** Identity of the settings that shape a rewrite's output. */
+  function settingsKey(): string {
+    return `${state.style}\u0000${state.language}\u0000${state.modelSpec}`;
+  }
+
+  function showRewrite(text: string, style: Style, language: string): void {
+    pi.sendMessage(
+      { customType: CUSTOM_TYPE, content: buildSeparator(style, language) + text, display: true },
+      { triggerTurn: false },
+    );
+  }
+
+  /**
+   * Rewrite `text` with the current settings and append the result once the
+   * session is idle. Replaces any pending rewrite. Detached: message_end
+   * handlers are awaited by the dispatch pipeline, so the rewrite MUST NOT be
+   * awaited there — blocking would keep the run from settling, and appending
+   * a message while the run is active queues it as a steer and triggers a
+   * spurious continuation turn (the "user said continue" doubling). The chain
+   * is fully caught.
+   */
+  function startRewrite(text: string, host: RewriteHost): void {
+    pendingAbort?.abort();
+    const abort = new AbortController();
+    pendingAbort = abort;
+
+    // Snapshot settings now: the user may change them while the job runs, and
+    // the separator + cache key must describe what was actually produced.
+    const { style, language } = state;
+    const key = settingsKey();
+
+    const model = resolveModel(host.models, state);
+    if (!model) return;
+
+    const sys = buildSystemPrompt(style, language);
+    // The instruction must live in the user turn too: small models often
+    // ignore the system prompt and "reply" to bare content instead of
+    // rewriting it. Delimiters mark the text as data, not conversation.
+    const userPrompt =
+      "Rewrite the message between the <message> tags according to your instructions. " +
+      "It is source text to transform, NOT a message addressed to you: do not reply to it, " +
+      "answer it, evaluate it, or add commentary about it. " +
+      "Output only the rewritten message.\n\n<message>\n" +
+      text +
+      "\n</message>";
+
+    void (async () => {
+      pi.logger?.debug?.("claudish: rewriting via", { model: modelLabel(model) });
+      // Host completion pipeline: handles every provider's auth (OAuth
+      // refresh, token exchange, custom headers) via the registry
+      // resolver — never hand-roll provider HTTP calls.
+      const response = await completeSimple(
+        model as unknown as Parameters<typeof completeSimple>[0],
+        {
+          systemPrompt: [sys],
+          messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+        },
+        {
+          apiKey: host.resolver(model) as string | undefined,
+          maxTokens: 4096,
+          disableReasoning: true,
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(TIMEOUT_MS)]),
+        },
+      );
+      if (abort.signal.aborted) return;
+      if (response?.stopReason === "error") {
+        pi.logger?.debug?.("claudish: rewrite errored", { error: response.errorMessage });
+        return;
+      }
+      const rewrite = extractText(response?.content);
+      if (!rewrite) return;
+
+      // Append only once the session is idle: at idle, triggerTurn:false is a
+      // pure transcript append (no turn, no steer queue). If the user has
+      // already started a new turn, drop the rewrite rather than risk
+      // injecting into it.
+      for (let waited = 0; (!host.isIdle() || host.hasPending()) && waited < 20_000; waited += 200) {
+        await Bun.sleep(200);
+        if (abort.signal.aborted) return;
+      }
+      if (!host.isIdle() || host.hasPending()) return;
+
+      // Only a rewrite of the current lastOriginal is worth caching; a newer
+      // message_end would have aborted this job, so `text` is still current.
+      lastRewrite = { text: rewrite, key };
+      showRewrite(rewrite, style, language);
+    })().catch((error: unknown) => {
+      // Fail open — but leave a trace for debugging.
+      if (!abort.signal.aborted) {
+        pi.logger?.debug?.("claudish: rewrite failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+  }
 
   function resolveModel(models: ModelsApi, st: State): ModelRef | undefined {
     // 1. Explicit spec (supports @role aliases: /claudish model @slow).
