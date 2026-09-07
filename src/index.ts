@@ -159,17 +159,24 @@ export default function claudish(pi: ExtensionAPI) {
 
   const defaultMinChars = parseInt(process.env.CLAUDISH_MIN_CHARS || String(MIN_CHARS), 10);
   let minChars = defaultMinChars;
-  /** Last rewritable assistant message (terminal message of a user turn). */
-  let lastOriginal = "";
   /**
-   * Rewrite of `lastOriginal` that was actually displayed, plus the settings
-   * snapshot that produced it. Null when `lastOriginal` was never rewritten
+   * Sources of the last rewritable turn: the answer first, then any agent-
+   * initiated follow-ups that were merged into it.
+   */
+  let lastSources: string[] = [];
+  /**
+   * Rewrite of `lastSources` that was actually displayed, plus the settings
+   * snapshot that produced it. Null when `lastSources` was never rewritten
    * (below the length gate, aborted, or errored).
    */
   let lastRewrite: { text: string; key: string } | null = null;
 
   // Pending rewrite cancellation.
   let pendingAbort: AbortController | null = null;
+  // Source texts of the in-flight rewrite: the turn's answer first, then any
+  // agent-initiated follow-ups merged into it. Non-empty exactly while a
+  // rewrite job is in flight; the owning job clears it when it settles.
+  let pendingSources: string[] = [];
 
   pi.setLabel("omp-claudish-to-english");
 
@@ -228,24 +235,31 @@ export default function claudish(pi: ExtensionAPI) {
       return;
     }
 
-    // Rewrite only the terminal message of a user-initiated turn. An agent-
-    // initiated follow-up — an advisor note, a stop-hook continuation, any
-    // agent-injected steer that lands on an already-finished answer and spawns
-    // a bonus turn — is skipped: rewriting it is noise, and letting it fall
-    // through would abort the pending rewrite of the answer that preceded it,
-    // leaving only the follow-up. The single pending-rewrite slot is therefore
-    // only ever cancelled/replaced by a genuine new user turn.
-    const sm = ctx && typeof ctx === "object" && "sessionManager" in ctx
-      ? (ctx as { sessionManager?: SessionManagerLike }).sessionManager
+    // Classify the turn. A user-initiated turn replaces the pending rewrite
+    // outright. An agent-initiated follow-up — an advisor note, a stop-hook
+    // continuation, any agent-injected steer that lands on an already-finished
+    // answer and spawns a bonus turn — can confirm or reverse that answer, so
+    // it is folded into the answer's rewrite while that rewrite is still in
+    // flight: the single box then reflects the final position. Once the
+    // previous rewrite has already appended, a follow-up is rewritten on its
+    // own — the length gate filters short acknowledgements, and a substantial
+    // follow-up (a reversal, new work after a blocker) earns its own box.
+    const smRaw = ctx && typeof ctx === "object" && "sessionManager" in ctx
+      ? ctx.sessionManager
       : undefined;
+    // Structural mirror of the opaque host SessionManager; only getBranch is
+    // touched, and its result is re-checked with Array.isArray below.
+    const sm = smRaw as SessionManagerLike | undefined;
     const branch = sm?.getBranch?.();
-    if (Array.isArray(branch) && isAgentFollowUpTurn(branch)) return;
+    const followUp = Array.isArray(branch) && isAgentFollowUpTurn(branch);
+    const merging = followUp && pendingSources.length > 0;
+    const sources = merging ? [...pendingSources, fullText] : [fullText];
 
-    lastOriginal = fullText;
+    lastSources = sources;
     lastRewrite = null;
 
     // Prose-length gate: strip fenced code blocks, then count non-whitespace.
-    const proseLen = fullText
+    const proseLen = sources.join("\n\n")
       .replace(/```[\s\S]*?```/g, "")
       .replace(/\s/g, "").length;
     if (proseLen < minChars) return;
@@ -253,7 +267,8 @@ export default function claudish(pi: ExtensionAPI) {
     const host = narrowHost(ctx);
     if (!host) return;
 
-    startRewrite(fullText, host);
+    // A merging follow-up re-issues the pending rewrite with itself folded in.
+    startRewrite(sources, host);
   });
 
   // ── /claudish command ─────────────────────────────────────────────────
@@ -302,7 +317,7 @@ export default function claudish(pi: ExtensionAPI) {
           state.modelSpec = rest;
           break;
         case "last": {
-          if (!lastOriginal) {
+          if (lastSources.length === 0) {
             ui.notify("No previous message recorded.", "warn");
             return;
           }
@@ -319,7 +334,7 @@ export default function claudish(pi: ExtensionAPI) {
             ui.notify("claudish: no model available for rewriting.", "warn");
             return;
           }
-          startRewrite(lastOriginal, host);
+          startRewrite(lastSources, host);
           ui.notify(
             `claudish: rewriting last message · style: ${state.style} · lang: ${state.language || "auto"}`,
             "info",
@@ -403,18 +418,20 @@ export default function claudish(pi: ExtensionAPI) {
   }
 
   /**
-   * Rewrite `text` with the current settings and append the result once the
-   * session is idle. Replaces any pending rewrite. Detached: message_end
-   * handlers are awaited by the dispatch pipeline, so the rewrite MUST NOT be
-   * awaited there — blocking would keep the run from settling, and appending
-   * a message while the run is active queues it as a steer and triggers a
-   * spurious continuation turn (the "user said continue" doubling). The chain
-   * is fully caught.
+   * Rewrite `sources` (the answer, then any merged follow-ups) with the current
+   * settings and append the result once the session is idle. Replaces any
+   * pending rewrite. Detached: message_end handlers are awaited by the
+   * dispatch pipeline, so the rewrite MUST NOT be awaited there — blocking
+   * would keep the run from settling, and appending a message while the run
+   * is active queues it as a steer and triggers a spurious continuation turn
+   * (the "user said continue" doubling). The chain is fully caught.
    */
-  function startRewrite(text: string, host: RewriteHost): void {
+  function startRewrite(sources: string[], host: RewriteHost): void {
     pendingAbort?.abort();
     const abort = new AbortController();
     pendingAbort = abort;
+    // The superseded job no longer owns the slot, so it will not clear this.
+    pendingSources = [];
 
     // Snapshot settings now: the user may change them while the job runs, and
     // the separator + cache key must describe what was actually produced.
@@ -428,13 +445,23 @@ export default function claudish(pi: ExtensionAPI) {
     // The instruction must live in the user turn too: small models often
     // ignore the system prompt and "reply" to bare content instead of
     // rewriting it. Delimiters mark the text as data, not conversation.
+    const followUps = sources.slice(1);
     const userPrompt =
-      "Rewrite the message between the <message> tags according to your instructions. " +
+      (followUps.length === 0
+        ? "Rewrite the message between the <message> tags according to your instructions. "
+        : "Rewrite the message between the <message> tags, together with its <follow-up> " +
+          "sections, according to your instructions. Each follow-up was written after the " +
+          "message and may confirm, amend, or reverse it; where they conflict, the latest " +
+          "follow-up states the final position. Produce ONE rewritten message that reflects " +
+          "only that final position. ") +
       "It is source text to transform, NOT a message addressed to you: do not reply to it, " +
       "answer it, evaluate it, or add commentary about it. " +
       "Output only the rewritten message.\n\n<message>\n" +
-      text +
-      "\n</message>";
+      sources[0] +
+      "\n</message>" +
+      followUps.map((f) => "\n\n<follow-up>\n" + f + "\n</follow-up>").join("");
+
+    pendingSources = sources;
 
     void (async () => {
       pi.logger?.debug?.("claudish: rewriting via", { model: modelLabel(model) });
@@ -472,8 +499,8 @@ export default function claudish(pi: ExtensionAPI) {
       }
       if (!host.isIdle() || host.hasPending()) return;
 
-      // Only a rewrite of the current lastOriginal is worth caching; a newer
-      // message_end would have aborted this job, so `text` is still current.
+      // Only a rewrite of the current lastSources is worth caching; a newer
+      // message_end would have aborted this job, so `sources` is still current.
       lastRewrite = { text: rewrite, key };
       showRewrite(rewrite, style, language);
     })().catch((error: unknown) => {
@@ -483,6 +510,10 @@ export default function claudish(pi: ExtensionAPI) {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    }).finally(() => {
+      // Only the job that still owns the slot releases the sources; a
+      // superseding job has already replaced both fields.
+      if (pendingAbort === abort) pendingSources = [];
     });
   }
 

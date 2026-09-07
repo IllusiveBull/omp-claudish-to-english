@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Agent-initiated follow-up turns are no longer dropped from the rewrite. A
+  follow-up that lands while the answer's rewrite is still in flight is merged
+  into it: the rewrite is re-issued with the follow-up as a `<follow-up>`
+  section, and the single plain-language block reflects the final position —
+  essential when an advisor note reverses the answer's direction instead of
+  confirming it. A follow-up that arrives after the rewrite has already been
+  appended is rewritten on its own; the length gate filters short
+  acknowledgements. A genuine new user turn still cancels any pending rewrite
+  outright.
 - `/claudish last` now shows the rewrite of the last assistant message under
   the *current* settings instead of echoing the original text. If style,
   language, or model changed since the rewrite was displayed — e.g.
@@ -17,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model call. The explicit request also bypasses the `min` length gate, so a
   message that was too short to be rewritten automatically can be rewritten on
   demand. The original text is always in the transcript already.
+- `/claudish last` records agent-initiated follow-ups too: a rewrite of a
+  merged answer is re-issued with its `<follow-up>` sections intact.
 
 ## [0.1.1] - 2026-09-02
 
