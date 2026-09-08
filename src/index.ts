@@ -170,6 +170,8 @@ export default function claudish(pi: ExtensionAPI) {
    * (below the length gate, aborted, or errored).
    */
   let lastRewrite: { text: string; key: string } | null = null;
+  /** Rewrite most recently displayed in the transcript, whatever its source. */
+  let lastShown: { text: string; style: Style; language: string } | null = null;
 
   // Pending rewrite cancellation.
   let pendingAbort: AbortController | null = null;
@@ -274,7 +276,7 @@ export default function claudish(pi: ExtensionAPI) {
   // ── /claudish command ─────────────────────────────────────────────────
   pi.registerCommand("claudish", {
     description:
-      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|reset",
+      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|save [path]|reset",
     handler: async (args: string, ctx: unknown) => {
       const ui = ctx && typeof ctx === "object" && "ui" in ctx
         ? ctx.ui as ExtCtx["ui"]
@@ -337,6 +339,27 @@ export default function claudish(pi: ExtensionAPI) {
           startRewrite(lastSources, host);
           ui.notify(
             `claudish: rewriting last message · style: ${state.style} · lang: ${state.language || "auto"}`,
+            "info",
+          );
+          return;
+        }
+        case "save": {
+          if (!lastShown) {
+            ui.notify("claudish: no rewrite displayed yet. Run /claudish last first.", "warn");
+            return;
+          }
+          const path = resolveSavePath(rest);
+          try {
+            await Bun.write(path, lastShown.text.trimEnd() + "\n");
+          } catch (error: unknown) {
+            ui.notify(
+              `claudish: could not write ${path}: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+            return;
+          }
+          ui.notify(
+            `claudish: saved last rewrite to ${path} · style: ${lastShown.style} · lang: ${lastShown.language || "auto"}`,
             "info",
           );
           return;
@@ -411,6 +434,7 @@ export default function claudish(pi: ExtensionAPI) {
   }
 
   function showRewrite(text: string, style: Style, language: string): void {
+    lastShown = { text, style, language };
     pi.sendMessage(
       { customType: CUSTOM_TYPE, content: buildSeparator(style, language) + text, display: true },
       { triggerTurn: false },
@@ -610,4 +634,17 @@ function extractText(content: unknown): string {
     .map((b) => b.text ?? "")
     .join("")
     .trim();
+}
+
+/**
+ * Target file for `/claudish save`. Empty → timestamped `claudish-*.md` in
+ * the working directory; `~/` expands to the home directory; a directory
+ * path (trailing slash) gets the timestamped name inside it.
+ */
+function resolveSavePath(spec: string, now: Date = new Date()): string {
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+  const defaultName = `claudish-${stamp}.md`;
+  if (!spec) return defaultName;
+  const expanded = spec.startsWith("~/") ? `${process.env.HOME ?? ""}${spec.slice(1)}` : spec;
+  return expanded.endsWith("/") ? expanded + defaultName : expanded;
 }
