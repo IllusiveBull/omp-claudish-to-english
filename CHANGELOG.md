@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/claudish save [path]` writes the last displayed rewrite to a Markdown
+  file. Without a path it creates `claudish-<timestamp>.md` in the working
+  directory; a path ending in `/` puts the timestamped file in that directory;
+  `~/` is expanded and missing directories are created. Only the rewrite text
+  is written — no separator, no original message.
+
 ### Changed
 
 - Agent-initiated follow-up turns are no longer dropped from the rewrite. A
