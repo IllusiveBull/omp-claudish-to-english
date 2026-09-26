@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/claudish last` records agent-initiated follow-ups too: a rewrite of a
   merged answer is re-issued with its `<follow-up>` sections intact.
 
+### Fixed
+
+- `/claudish last` works while rewrites are off. Messages are still recorded
+  when `/claudish off` is active, so `last` rewrites the newest assistant
+  message instead of replaying the last rewrite shown before turning off.
+- A rewrite that finishes after a newer message arrived is no longer cached
+  as that newer message's rewrite, so `/claudish last` never replays a stale
+  rewrite.
+
 ## [0.1.1] - 2026-09-02
 
 ### Fixed
