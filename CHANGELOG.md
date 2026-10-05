@@ -37,6 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/claudish last` records agent-initiated follow-ups too: a rewrite of a
   merged answer is re-issued with its `<follow-up>` sections intact.
 
+### Fixed
+
+- A failed rewrite no longer fails silently. Previously every error went to
+  the debug log only, so `/claudish last` showed "rewriting last message" and
+  then nothing, and automatic rewrites simply never appeared. A provider
+  error, timeout, or empty reply now shows a warning with the model and the
+  first line of the error.
+- A rewrite model without a usable credential — e.g. a `@tiny` role on a
+  provider whose OAuth refresh fails — no longer blocks rewriting. Candidates
+  are checked in order (explicit spec → `@tiny` → `@smol` → session model) and
+  keyless ones are skipped; if none has a key, a warning lists them.
+
 ## [0.1.1] - 2026-09-02
 
 ### Fixed

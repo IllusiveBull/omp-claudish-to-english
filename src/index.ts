@@ -11,7 +11,7 @@
  * context, so it never affects the agent's reasoning.
  */
 
-import { completeSimple } from "@oh-my-pi/pi-ai";
+import { completeSimple, type AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 // ── Minimal structural types for OMP runtime objects ─────────────────────
@@ -35,9 +35,11 @@ interface ModelsApi {
   list?(): ModelRef[];
 }
 
-/** Subset of OMP ModelRegistry: session-aware API-key resolver factory. */
+/** Subset of OMP ModelRegistry: credential lookup and API-key resolver factory. */
 interface RegistryLike {
   resolver?(model: ModelRef, sessionId?: string): unknown;
+  /** Resolves (refreshing OAuth if needed) the model's key; undefined when none is usable. */
+  getApiKey?(model: ModelRef, sessionId?: string, options?: { signal?: AbortSignal }): Promise<string | undefined>;
 }
 
 interface ExtCtx {
@@ -375,7 +377,7 @@ export default function claudish(pi: ExtensionAPI) {
           const models = ctx && typeof ctx === "object" && "models" in ctx
             ? ctx.models as ModelsApi | undefined
             : undefined;
-          const resolved = models ? resolveModel(models, state) : undefined;
+          const resolved = models ? modelCandidates(models, state)[0] : undefined;
           const lines = [
             "claudish · plain-language rewrite",
             "",
@@ -403,6 +405,9 @@ export default function claudish(pi: ExtensionAPI) {
   interface RewriteHost {
     models: ModelsApi;
     resolver: (model: ModelRef, sessionId?: string) => unknown;
+    /** False when the host has no usable credential for `model`. */
+    hasKey: (model: ModelRef, signal: AbortSignal) => Promise<boolean>;
+    notify: (msg: string, level: string) => void;
     isIdle: () => boolean;
     hasPending: () => boolean;
   }
@@ -412,9 +417,17 @@ export default function claudish(pi: ExtensionAPI) {
     const models = "models" in ctx ? ctx.models as ModelsApi | undefined : undefined;
     const registry = "modelRegistry" in ctx ? ctx.modelRegistry as RegistryLike | undefined : undefined;
     if (!models || !registry?.resolver) return undefined;
+    const ui = "ui" in ctx ? ctx.ui as Partial<ExtCtx["ui"]> | undefined : undefined;
+    const getApiKey = registry.getApiKey?.bind(registry);
     return {
       models,
       resolver: registry.resolver.bind(registry),
+      // Without the lookup, every candidate is tried and the completion
+      // itself reports a missing key.
+      hasKey: getApiKey
+        ? async (model, signal) => Boolean(await getApiKey(model, undefined, { signal }))
+        : async () => true,
+      notify: typeof ui?.notify === "function" ? ui.notify.bind(ui) : () => {},
       isIdle: boolMethod(ctx, "isIdle") ?? (() => true),
       hasPending: boolMethod(ctx, "hasPendingMessages") ?? (() => false),
     };
@@ -462,8 +475,11 @@ export default function claudish(pi: ExtensionAPI) {
     const { style, language } = state;
     const key = settingsKey();
 
-    const model = resolveModel(host.models, state);
-    if (!model) return;
+    const candidates = modelCandidates(host.models, state);
+    if (candidates.length === 0) {
+      host.notify("claudish: no model available for rewriting.", "warn");
+      return;
+    }
 
     const sys = buildSystemPrompt(style, language);
     // The instruction must live in the user turn too: small models often
@@ -488,30 +504,77 @@ export default function claudish(pi: ExtensionAPI) {
     pendingSources = sources;
 
     void (async () => {
-      pi.logger?.debug?.("claudish: rewriting via", { model: modelLabel(model) });
+      const timeout = AbortSignal.timeout(TIMEOUT_MS);
+      const signal = AbortSignal.any([abort.signal, timeout]);
+      // Skip candidates without a usable credential (e.g. an expired OAuth
+      // grant) instead of failing the whole rewrite on the first pick.
+      const skipped: string[] = [];
+      let model: ModelRef | undefined;
+      for (const candidate of candidates) {
+        if (await host.hasKey(candidate, signal)) {
+          model = candidate;
+          break;
+        }
+        if (signal.aborted) break;
+        skipped.push(modelLabel(candidate));
+      }
+      if (abort.signal.aborted) return;
+      if (timeout.aborted) throw timeout.reason;
+      if (!model) {
+        host.notify(
+          `claudish: rewrite skipped — no API key for ${skipped.join(", ")}. ` +
+            "Run /login, or pick another model with /claudish model <spec>.",
+          "warn",
+        );
+        return;
+      }
+      const label = modelLabel(model);
+      if (skipped.length > 0) {
+        pi.logger?.debug?.("claudish: skipped models without API key", { skipped, model: label });
+      }
+      pi.logger?.debug?.("claudish: rewriting via", { model: label });
+      const fail = (reason: string): void => {
+        pi.logger?.debug?.("claudish: rewrite failed", { model: label, error: reason });
+        host.notify(`claudish: rewrite via ${label} failed: ${firstLine(reason)}`, "warn");
+      };
       // Host completion pipeline: handles every provider's auth (OAuth
       // refresh, token exchange, custom headers) via the registry
       // resolver — never hand-roll provider HTTP calls.
-      const response = await completeSimple(
-        model as unknown as Parameters<typeof completeSimple>[0],
-        {
-          systemPrompt: [sys],
-          messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
-        },
-        {
-          apiKey: host.resolver(model) as string | undefined,
-          maxTokens: 4096,
-          disableReasoning: true,
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(TIMEOUT_MS)]),
-        },
-      );
+      let response: AssistantMessage;
+      try {
+        response = await completeSimple(
+          model as unknown as Parameters<typeof completeSimple>[0],
+          {
+            systemPrompt: [sys],
+            messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+          },
+          {
+            apiKey: host.resolver(model) as string | undefined,
+            maxTokens: 4096,
+            disableReasoning: true,
+            signal,
+          },
+        );
+      } catch (error: unknown) {
+        if (abort.signal.aborted) return;
+        const reason = error instanceof Error ? error.message : String(error);
+        fail(timeout.aborted ? `timed out after ${TIMEOUT_MS / 1000} s` : reason);
+        return;
+      }
       if (abort.signal.aborted) return;
+      if (timeout.aborted) {
+        fail(`timed out after ${TIMEOUT_MS / 1000} s`);
+        return;
+      }
       if (response?.stopReason === "error") {
-        pi.logger?.debug?.("claudish: rewrite errored", { error: response.errorMessage });
+        fail(response.errorMessage || "provider returned an error");
         return;
       }
       const rewrite = extractText(response?.content);
-      if (!rewrite) return;
+      if (!rewrite) {
+        fail("model returned no text");
+        return;
+      }
 
       // Append only once the session is idle: at idle, triggerTurn:false is a
       // pure transcript append (no turn, no steer queue). If the user has
@@ -528,12 +591,14 @@ export default function claudish(pi: ExtensionAPI) {
       lastRewrite = { text: rewrite, key };
       showRewrite(rewrite, style, language);
     })().catch((error: unknown) => {
-      // Fail open — but leave a trace for debugging.
-      if (!abort.signal.aborted) {
-        pi.logger?.debug?.("claudish: rewrite failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      // Fail open: never break the session, but tell the user why nothing
+      // appeared. A superseded job stays silent.
+      if (abort.signal.aborted) return;
+      const reason = error instanceof DOMException && error.name === "TimeoutError"
+        ? `timed out after ${TIMEOUT_MS / 1000} s`
+        : error instanceof Error ? error.message : String(error);
+      pi.logger?.debug?.("claudish: rewrite failed", { error: reason });
+      host.notify(`claudish: rewrite failed: ${firstLine(reason)}`, "warn");
     }).finally(() => {
       // Only the job that still owns the slot releases the sources; a
       // superseding job has already replaced both fields.
@@ -541,12 +606,23 @@ export default function claudish(pi: ExtensionAPI) {
     });
   }
 
-  function resolveModel(models: ModelsApi, st: State): ModelRef | undefined {
+  /**
+   * Rewrite models in preference order, deduplicated. The job uses the first
+   * one with a usable credential.
+   */
+  function modelCandidates(models: ModelsApi, st: State): ModelRef[] {
+    const out: ModelRef[] = [];
+    const seen = new Set<string>();
+    const add = (m: ModelRef | undefined): void => {
+      if (!m) return;
+      const label = modelLabel(m);
+      if (seen.has(label)) return;
+      seen.add(label);
+      out.push(m);
+    };
+
     // 1. Explicit spec (supports @role aliases: /claudish model @slow).
-    if (st.modelSpec) {
-      const m = models.resolve?.(st.modelSpec);
-      if (m) return m;
-    }
+    if (st.modelSpec) add(models.resolve?.(st.modelSpec));
 
     // 2. OMP role aliases — tiny first: it is OMP's semantic role for small
     //    utility tasks (titles, classifiers, rewrites) and, when unset, falls
@@ -554,11 +630,12 @@ export default function claudish(pi: ExtensionAPI) {
     const currentId = models.current?.()?.id ?? "";
     for (const role of ["@tiny", "@smol"]) {
       const m = models.resolve?.(role);
-      if (m && m.id !== currentId) return m;
+      if (m && m.id !== currentId) add(m);
     }
 
-    // 3. Last resort: the session's own model (guaranteed authed), then any.
-    return models.current?.() ?? models.list?.()?.[0];
+    // 3. Last resort: the session's own model, then any.
+    add(models.current?.() ?? models.list?.()?.[0]);
+    return out;
   }
 }
 
@@ -571,6 +648,12 @@ function isMode(v: unknown): v is Mode {
 function modelLabel(m: ModelRef): string {
   const provider = typeof m.provider === "string" ? m.provider : "";
   return provider ? `${provider}/${m.id ?? "?"}` : String(m.id ?? "?");
+}
+
+/** First line of a provider error, capped: some embed raw request dumps. */
+function firstLine(text: string): string {
+  const line = text.split("\n", 1)[0]?.trim() ?? "";
+  return line.length > 200 ? line.slice(0, 199) + "…" : line;
 }
 
 function isStyle(v: unknown): v is Style {
