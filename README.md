@@ -28,7 +28,7 @@ This port needs **no provider setup at all**. Completions go through the host's 
 - **Any target language** — `/claudish language Spanish` makes every rewrite Spanish
 - **Inherited auth** — uses the models you already set up in OMP; no extra API keys
 - **Cheap by default** — tries the host's `@tiny` / `@smol` utility-model roles first, and only falls back to the session's own model
-- **Non-intrusive** — skips short messages, skips messages with tool calls, waits until the session is idle, drops stale rewrites, and fails open (an error never breaks your session)
+- **Non-intrusive** — skips short messages, skips messages with tool calls, waits until the session is idle, drops stale rewrites, and fails open (an error never breaks your session; a warning says why no rewrite appeared)
 
 ## Installation
 
@@ -94,8 +94,10 @@ Settings last for one session. Use the environment variables below for lasting d
 3. A rewrite model is picked, cheapest first:
    1. the explicit `/claudish model` spec, if set;
    2. the host's `@tiny`, then `@smol` role aliases (skipping the session's own model);
-   3. the session's own model — it is always authenticated.
-4. The completion runs in the background with a 45 s timeout, through the host pipeline. OMP itself handles provider auth (OAuth refresh, token exchange, custom headers). A newer message cancels any rewrite still in flight.
+   3. the session's own model.
+
+   Candidates without a usable credential (no key, or an expired OAuth login that fails to refresh) are skipped, and the first authenticated one is used. If none has a key, a warning lists them all.
+4. The completion runs in the background with a 45 s timeout, through the host pipeline. OMP itself handles provider auth (OAuth refresh, token exchange, custom headers). A newer message cancels any rewrite still in flight. A failed rewrite — provider error, timeout, empty reply — shows a warning naming the model and the first line of the error.
 5. The rewrite waits for the session to go idle (up to 20 s). Then it is added as a custom transcript message (`claudish-rewrite`, `triggerTurn: false`). If you already started a new turn, it is dropped instead.
 6. A `context` filter removes `claudish-rewrite` messages from everything sent to the LLM.
 
