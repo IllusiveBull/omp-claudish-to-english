@@ -10,7 +10,11 @@ When the assistant finishes a long, jargon-heavy reply, claudish asks a cheap mo
 
 The build broke because two files disagree about one setting. I changed
 src/config.ts so both use the same value, and the tests pass now.
+
+via `anthropic/claude-haiku-4-5` · 2.1 s
 ```
+
+The last line names the model that wrote the rewrite and how long it took, from the start of the rewrite job to the model's reply. Time spent waiting for the session to go idle is not counted.
 
 The rewrite is **for your eyes only**. A filter keeps it out of the LLM context, so it never changes what the agent thinks. It is also only added once the session is idle, so it never gets in the way of a running turn.
 

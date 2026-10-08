@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory; a path ending in `/` puts the timestamped file in that directory;
   `~/` is expanded and missing directories are created. Only the rewrite text
   is written — no separator, no original message.
+- The rewrite block ends with a footer naming the model that produced it and
+  how long the rewrite took, e.g. ``*via `anthropic/claude-haiku-4-5` · 2.1 s*``.
+  The time runs from job start (credential lookup included) to the model's
+  reply; the wait for the session to go idle is excluded. `/claudish last`
+  replays the original footer when it replays a cached rewrite. `/claudish
+  save` still writes only the rewrite text.
 
 ### Changed
 
