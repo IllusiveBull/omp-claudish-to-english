@@ -75,7 +75,7 @@ Everything is controlled with the `/claudish` slash command:
 | `/claudish language <name>` | Rewrite in that language (empty = same language as the original message) |
 | `/claudish model <spec>` | Pin the rewrite model (e.g. `openai/gpt-4.1-mini` or a role alias like `@slow`) |
 | `/claudish min <chars>` | How long a message must be before it gets rewritten (non-whitespace chars, code blocks not counted) |
-| `/claudish last` | Show the rewrite of the last assistant message with the current settings. Replays it if nothing changed; if you switched style/language/model since — or the message was too short to be rewritten automatically — it is rewritten anew |
+| `/claudish last` | Show the rewrite of the last assistant message with the current settings. Works while rewrites are `off`, too. Replays it if nothing changed; if you switched style/language/model since — or the message was never rewritten (too short, or rewrites were off) — it is rewritten anew |
 | `/claudish save [path]` | Write the last displayed rewrite to a Markdown file. No path → `claudish-<timestamp>.md` in the working directory; a path ending in `/` → the timestamped file inside that directory; `~/` is expanded. Missing directories are created |
 | `/claudish reset` | Put all settings back to their defaults |
 
