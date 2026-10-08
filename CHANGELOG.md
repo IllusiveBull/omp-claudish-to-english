@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory; a path ending in `/` puts the timestamped file in that directory;
   `~/` is expanded and missing directories are created. Only the rewrite text
   is written — no separator, no original message.
+- `/claudish copy` puts the last displayed rewrite on the clipboard, so it can
+  be pasted without the `│` border that a terminal selection of the
+  transcript picks up. Like `save`, it copies only the rewrite text. It uses
+  OMP's clipboard helper: OSC 52 to the terminal (works over SSH) plus the
+  native clipboard when one is available.
 - The rewrite block ends with a footer naming the model that produced it and
   how long the rewrite took, e.g. ``*via `anthropic/claude-haiku-4-5` · 2.1 s*``.
   The time runs from job start (credential lookup included) to the model's

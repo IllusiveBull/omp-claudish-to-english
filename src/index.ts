@@ -13,6 +13,7 @@
 
 import { completeSimple, type AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 
 // ── Minimal structural types for OMP runtime objects ─────────────────────
 // Everything from the runtime context is mirrored here just enough for type
@@ -293,7 +294,7 @@ export default function claudish(pi: ExtensionAPI) {
   // ── /claudish command ─────────────────────────────────────────────────
   pi.registerCommand("claudish", {
     description:
-      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|save [path]|reset",
+      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|copy|save [path]|reset",
     handler: async (args: string, ctx: unknown) => {
       const ui = ctx && typeof ctx === "object" && "ui" in ctx
         ? ctx.ui as ExtCtx["ui"]
@@ -356,6 +357,28 @@ export default function claudish(pi: ExtensionAPI) {
           startRewrite(lastSources, host);
           ui.notify(
             `claudish: rewriting last message · style: ${state.style} · lang: ${state.language || "auto"}`,
+            "info",
+          );
+          return;
+        }
+        case "copy": {
+          if (!lastShown) {
+            ui.notify("claudish: no rewrite displayed yet. Run /claudish last first.", "warn");
+            return;
+          }
+          // Host clipboard: OSC 52 to the terminal (reaches the local
+          // clipboard over SSH too), plus the native clipboard when available.
+          try {
+            await copyToClipboard(lastShown.text.trim());
+          } catch (error: unknown) {
+            ui.notify(
+              `claudish: could not copy: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+            return;
+          }
+          ui.notify(
+            `claudish: copied last rewrite · style: ${lastShown.style} · lang: ${lastShown.language || "auto"}`,
             "info",
           );
           return;
