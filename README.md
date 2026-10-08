@@ -16,6 +16,8 @@ via `anthropic/claude-haiku-4-5` · 2.1 s
 
 The last line names the model that wrote the rewrite and how long it took, from the start of the rewrite job to the model's reply. Time spent waiting for the session to go idle is not counted.
 
+The rewrite is drawn like a normal assistant reply, with no box around it. Selecting it in the terminal copies just the text, without border characters.
+
 The rewrite is **for your eyes only**. A filter keeps it out of the LLM context, so it never changes what the agent thinks. It is also only added once the session is idle, so it never gets in the way of a running turn.
 
 This is a TypeScript port of [claudish-to-english](https://github.com/gvzdv/claudish-to-english) (a Claude Code plugin by Mike Gvozdev) to the OMP extension API. The original needs ~80 KB of shell to work around one problem: hooks run outside the host, so it must detect providers, hold API keys, and keep state files itself. OMP extensions run inside the host process, so all of that fits in one file.

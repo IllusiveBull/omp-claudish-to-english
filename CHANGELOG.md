@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The rewrite is drawn as plain Markdown, like an assistant reply, instead of
+  inside OMP's default bordered card. Copying it from the terminal no longer
+  picks up the card's `│` border characters.
+
 - Agent-initiated follow-up turns are no longer dropped from the rewrite. A
   follow-up that lands while the answer's rewrite is still in flight is merged
   into it: the rewrite is re-issued with the follow-up as a `<follow-up>`

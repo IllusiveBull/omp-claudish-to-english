@@ -12,7 +12,8 @@
  */
 
 import { completeSimple, type AssistantMessage } from "@oh-my-pi/pi-ai";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { Container, Markdown, Spacer } from "@oh-my-pi/pi-tui";
 
 // ── Minimal structural types for OMP runtime objects ─────────────────────
 // Everything from the runtime context is mirrored here just enough for type
@@ -208,6 +209,22 @@ export default function claudish(pi: ExtensionAPI) {
           !m || typeof m !== "object" || !("customType" in m) || m.customType !== CUSTOM_TYPE,
       ),
     };
+  });
+
+  // Render the rewrite like an assistant answer: plain Markdown, no box. The
+  // host's default card draws a border, and terminal selection copies its
+  // `│` glyphs along with the text.
+  pi.registerMessageRenderer(CUSTOM_TYPE, (message, _options, theme) => {
+    const text = typeof message.content === "string" ? message.content.trim() : extractText(message.content);
+    if (!text) return undefined;
+    const view = new Container();
+    view.addChild(new Spacer(1));
+    view.addChild(
+      new Markdown(text, 1, 0, getMarkdownTheme(), {
+        color: (value: string) => theme.fg("customMessageText", value),
+      }),
+    );
+    return view;
   });
 
 
