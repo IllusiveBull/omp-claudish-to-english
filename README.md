@@ -10,7 +10,11 @@ When the assistant finishes a long, jargon-heavy reply, claudish asks a cheap mo
 
 The build broke because two files disagree about one setting. I changed
 src/config.ts so both use the same value, and the tests pass now.
+
+via `anthropic/claude-haiku-4-5` · 2.1 s
 ```
+
+The last line names the model that wrote the rewrite and how long it took, from the start of the rewrite job to the model's reply. Time spent waiting for the session to go idle is not counted.
 
 The rewrite is **for your eyes only**. A filter keeps it out of the LLM context, so it never changes what the agent thinks. It is also only added once the session is idle, so it never gets in the way of a running turn.
 
@@ -72,6 +76,7 @@ Everything is controlled with the `/claudish` slash command:
 | `/claudish model <spec>` | Pin the rewrite model (e.g. `openai/gpt-4.1-mini` or a role alias like `@slow`) |
 | `/claudish min <chars>` | How long a message must be before it gets rewritten (non-whitespace chars, code blocks not counted) |
 | `/claudish last` | Show the rewrite of the last assistant message with the current settings. Works while rewrites are `off`, too. Replays it if nothing changed; if you switched style/language/model since — or the message was never rewritten (too short, or rewrites were off) — it is rewritten anew |
+| `/claudish copy` | Copy the last displayed rewrite to the clipboard — just the rewrite text, without the separator, footer, or the transcript's border. Uses OSC 52, so it also works over SSH in terminals that support it |
 | `/claudish save [path]` | Write the last displayed rewrite to a Markdown file. No path → `claudish-<timestamp>.md` in the working directory; a path ending in `/` → the timestamped file inside that directory; `~/` is expanded. Missing directories are created |
 | `/claudish reset` | Put all settings back to their defaults |
 

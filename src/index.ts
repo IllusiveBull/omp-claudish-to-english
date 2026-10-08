@@ -13,6 +13,7 @@
 
 import { completeSimple, type AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 
 // ── Minimal structural types for OMP runtime objects ─────────────────────
 // Everything from the runtime context is mirrored here just enough for type
@@ -74,6 +75,14 @@ interface State {
   modelSpec: string;
 }
 
+/** Provenance of a rewrite, shown under the rewritten text. */
+interface RewriteMeta {
+  /** `provider/id` of the model that produced the rewrite. */
+  model: string;
+  /** Wall time from job start to the model's reply, in milliseconds. */
+  ms: number;
+}
+
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -130,6 +139,11 @@ function buildSeparator(style: Style, lang: string): string {
   }
 }
 
+/** Footer line naming the model and how long the rewrite took. */
+function buildFooter(meta: RewriteMeta): string {
+  return `\n\n*via \`${meta.model}\` · ${(meta.ms / 1000).toFixed(1)} s*`;
+}
+
 function buildSystemPrompt(style: Style, language: string): string {
   let sys = SYSTEM_PROMPTS[style];
 
@@ -171,7 +185,7 @@ export default function claudish(pi: ExtensionAPI) {
    * snapshot that produced it. Null when `lastSources` was never rewritten
    * (below the length gate, aborted, or errored).
    */
-  let lastRewrite: { text: string; key: string } | null = null;
+  let lastRewrite: { text: string; key: string; meta: RewriteMeta } | null = null;
   /** Rewrite most recently displayed in the transcript, whatever its source. */
   let lastShown: { text: string; style: Style; language: string } | null = null;
 
@@ -280,7 +294,7 @@ export default function claudish(pi: ExtensionAPI) {
   // ── /claudish command ─────────────────────────────────────────────────
   pi.registerCommand("claudish", {
     description:
-      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|save [path]|reset",
+      "Control claudish rewrite: on|off|style <tldr|5y|caveman|default>|language <name>|model <spec>|min <chars>|last|copy|save [path]|reset",
     handler: async (args: string, ctx: unknown) => {
       const ui = ctx && typeof ctx === "object" && "ui" in ctx
         ? ctx.ui as ExtCtx["ui"]
@@ -332,7 +346,7 @@ export default function claudish(pi: ExtensionAPI) {
           // rewrite (length gate, abort, error) → rewrite now with the current
           // settings. The explicit request bypasses the length gate.
           if (lastRewrite && lastRewrite.key === settingsKey()) {
-            showRewrite(lastRewrite.text, state.style, state.language);
+            showRewrite(lastRewrite.text, state.style, state.language, lastRewrite.meta);
             return;
           }
           const host = narrowHost(ctx);
@@ -343,6 +357,28 @@ export default function claudish(pi: ExtensionAPI) {
           startRewrite(lastSources, host);
           ui.notify(
             `claudish: rewriting last message · style: ${state.style} · lang: ${state.language || "auto"}`,
+            "info",
+          );
+          return;
+        }
+        case "copy": {
+          if (!lastShown) {
+            ui.notify("claudish: no rewrite displayed yet. Run /claudish last first.", "warn");
+            return;
+          }
+          // Host clipboard: OSC 52 to the terminal (reaches the local
+          // clipboard over SSH too), plus the native clipboard when available.
+          try {
+            await copyToClipboard(lastShown.text.trim());
+          } catch (error: unknown) {
+            ui.notify(
+              `claudish: could not copy: ${error instanceof Error ? error.message : String(error)}`,
+              "error",
+            );
+            return;
+          }
+          ui.notify(
+            `claudish: copied last rewrite · style: ${lastShown.style} · lang: ${lastShown.language || "auto"}`,
             "info",
           );
           return;
@@ -448,10 +484,14 @@ export default function claudish(pi: ExtensionAPI) {
     return `${state.style}\u0000${state.language}\u0000${state.modelSpec}`;
   }
 
-  function showRewrite(text: string, style: Style, language: string): void {
+  function showRewrite(text: string, style: Style, language: string, meta: RewriteMeta): void {
     lastShown = { text, style, language };
     pi.sendMessage(
-      { customType: CUSTOM_TYPE, content: buildSeparator(style, language) + text, display: true },
+      {
+        customType: CUSTOM_TYPE,
+        content: buildSeparator(style, language) + text + buildFooter(meta),
+        display: true,
+      },
       { triggerTurn: false },
     );
   }
@@ -506,6 +546,7 @@ export default function claudish(pi: ExtensionAPI) {
     pendingSources = sources;
 
     void (async () => {
+      const startedAt = performance.now();
       const timeout = AbortSignal.timeout(TIMEOUT_MS);
       const signal = AbortSignal.any([abort.signal, timeout]);
       // Skip candidates without a usable credential (e.g. an expired OAuth
@@ -563,6 +604,9 @@ export default function claudish(pi: ExtensionAPI) {
         fail(timeout.aborted ? `timed out after ${TIMEOUT_MS / 1000} s` : reason);
         return;
       }
+      // Measured before the idle wait: the footer reports rewrite cost, not
+      // how long the session kept the result queued.
+      const ms = performance.now() - startedAt;
       if (abort.signal.aborted) return;
       if (timeout.aborted) {
         fail(`timed out after ${TIMEOUT_MS / 1000} s`);
@@ -592,8 +636,9 @@ export default function claudish(pi: ExtensionAPI) {
       // message_end that did not start its own rewrite (off, length gate)
       // leaves this job running, and its text must not stand in for the
       // newer message.
-      if (lastSources === sources) lastRewrite = { text: rewrite, key };
-      showRewrite(rewrite, style, language);
+      const meta: RewriteMeta = { model: label, ms };
+      if (lastSources === sources) lastRewrite = { text: rewrite, key, meta };
+      showRewrite(rewrite, style, language, meta);
     })().catch((error: unknown) => {
       // Fail open: never break the session, but tell the user why nothing
       // appeared. A superseded job stays silent.
