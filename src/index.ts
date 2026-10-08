@@ -202,9 +202,9 @@ export default function claudish(pi: ExtensionAPI) {
   // message_end fires per assistant message. Intermediate messages that carry
   // tool calls are skipped: they will be followed by tool execution and
   // another message. Only the final message (no tool calls) is rewritten.
+  // The final message is recorded for `/claudish last` even while rewriting
+  // is off, so `last` always targets the newest answer.
   pi.on("message_end", async (event: unknown, ctx: unknown) => {
-    if (state.mode === "off") return;
-
     // Narrow event → message → content.
     if (!event || typeof event !== "object" || !("message" in event)) return;
     const msg = event.message;
@@ -261,6 +261,8 @@ export default function claudish(pi: ExtensionAPI) {
 
     lastSources = sources;
     lastRewrite = null;
+
+    if (state.mode === "off") return;
 
     // Prose-length gate: strip fenced code blocks, then count non-whitespace.
     const proseLen = sources.join("\n\n")
@@ -586,9 +588,11 @@ export default function claudish(pi: ExtensionAPI) {
       }
       if (!host.isIdle() || host.hasPending()) return;
 
-      // Only a rewrite of the current lastSources is worth caching; a newer
-      // message_end would have aborted this job, so `sources` is still current.
-      lastRewrite = { text: rewrite, key };
+      // Only a rewrite of the current lastSources is worth caching: a newer
+      // message_end that did not start its own rewrite (off, length gate)
+      // leaves this job running, and its text must not stand in for the
+      // newer message.
+      if (lastSources === sources) lastRewrite = { text: rewrite, key };
       showRewrite(rewrite, style, language);
     })().catch((error: unknown) => {
       // Fail open: never break the session, but tell the user why nothing
