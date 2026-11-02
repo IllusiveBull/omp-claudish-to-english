@@ -25,9 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reply; the wait for the session to go idle is excluded. `/claudish last`
   replays the original footer when it replays a cached rewrite. `/claudish
   save` still writes only the rewrite text.
+- Settings changed with `/claudish` (`on`/`off`, `style`, `language`,
+  `model`, `min`) are saved to `claudish.json` in the OMP agent directory
+  (`~/.omp/agent/` by default, profile-aware) and restored in later sessions —
+  e.g. after `/claudish off`, the next session starts off. Only changed keys
+  are stored; each overrides its `CLAUDISH_*` environment variable, and the
+  environment still supplies the rest. A missing, unreadable, or malformed
+  file or key is ignored. If saving fails, a warning says the change applies
+  to this session only.
 
 ### Changed
 
+- `/claudish reset` also deletes the saved settings file, and now resets
+  mode, style, language, and model to the `CLAUDISH_*` environment defaults
+  (as `min` already did) instead of the built-in defaults, matching what a
+  fresh session starts with.
 - Agent-initiated follow-up turns are no longer dropped from the rewrite. A
   follow-up that lands while the answer's rewrite is still in flight is merged
   into it: the rewrite is re-issued with the follow-up as a `<follow-up>`

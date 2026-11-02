@@ -78,11 +78,13 @@ Everything is controlled with the `/claudish` slash command:
 | `/claudish last` | Show the rewrite of the last assistant message with the current settings. Works while rewrites are `off`, too. Replays it if nothing changed; if you switched style/language/model since — or the message was never rewritten (too short, or rewrites were off) — it is rewritten anew |
 | `/claudish copy` | Copy the last displayed rewrite to the clipboard — just the rewrite text, without the separator, footer, or the transcript's border. Uses OSC 52, so it also works over SSH in terminals that support it |
 | `/claudish save [path]` | Write the last displayed rewrite to a Markdown file. No path → `claudish-<timestamp>.md` in the working directory; a path ending in `/` → the timestamped file inside that directory; `~/` is expanded. Missing directories are created |
-| `/claudish reset` | Put all settings back to their defaults |
+| `/claudish reset` | Put all settings back to their defaults (the environment variables below, else the built-in defaults) and delete the saved settings file |
 
-Settings last for one session. Use the environment variables below for lasting defaults.
+Changed settings are saved to `~/.omp/agent/claudish.json` (the active OMP profile's agent directory) and apply again in later sessions. If you turned rewrites `off`, they stay off until `/claudish on`. Only the settings you changed are saved; a saved setting overrides its environment variable.
 
 ## Configuration
+
+Environment variables set the defaults. Settings saved with `/claudish` override them.
 
 | Variable | Values | Default | Description |
 | --- | --- | --- | --- |
