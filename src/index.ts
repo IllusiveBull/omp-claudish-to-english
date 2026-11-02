@@ -11,8 +11,10 @@
  * context, so it never affects the agent's reasoning.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { completeSimple, type AssistantMessage } from "@oh-my-pi/pi-ai";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 
 // ── Minimal structural types for OMP runtime objects ─────────────────────
@@ -75,6 +77,19 @@ interface State {
   modelSpec: string;
 }
 
+/**
+ * Settings changed with `/claudish`, kept across sessions in
+ * `<agent dir>/claudish.json`. Only explicitly changed keys are stored, so
+ * the environment still supplies every other default.
+ */
+interface Saved {
+  mode?: Mode;
+  style?: Style;
+  language?: string;
+  model?: string;
+  min?: number;
+}
+
 /** Provenance of a rewrite, shown under the rewritten text. */
 interface RewriteMeta {
   /** `provider/id` of the model that produced the rewrite. */
@@ -89,6 +104,7 @@ interface RewriteMeta {
 const CUSTOM_TYPE = "claudish-rewrite";
 const MIN_CHARS = 200;
 const TIMEOUT_MS = 45_000;
+const SETTINGS_FILE = "claudish.json";
 
 
 // ── Prompts ──────────────────────────────────────────────────────────────
@@ -166,15 +182,23 @@ function buildSystemPrompt(style: Style, language: string): string {
 // ── Extension factory ────────────────────────────────────────────────────
 
 export default function claudish(pi: ExtensionAPI) {
-  const state: State = {
+  const defaultState: Readonly<State> = {
     mode: isMode(process.env.CLAUDISH_MODE) ? process.env.CLAUDISH_MODE : "append",
     style: isStyle(process.env.CLAUDISH_STYLE) ? process.env.CLAUDISH_STYLE : "default",
     language: process.env.CLAUDISH_LANG ?? "",
     modelSpec: process.env.CLAUDISH_MODEL ?? "",
   };
-
   const defaultMinChars = parseInt(process.env.CLAUDISH_MIN_CHARS || String(MIN_CHARS), 10);
-  let minChars = defaultMinChars;
+
+  // Saved settings win over the environment defaults.
+  let saved = loadSaved();
+  const state: State = {
+    mode: saved.mode ?? defaultState.mode,
+    style: saved.style ?? defaultState.style,
+    language: saved.language ?? defaultState.language,
+    modelSpec: saved.model ?? defaultState.modelSpec,
+  };
+  let minChars = saved.min ?? defaultMinChars;
   /**
    * Sources of the last rewritable turn: the answer first, then any agent-
    * initiated follow-ups that were merged into it.
@@ -305,15 +329,15 @@ export default function claudish(pi: ExtensionAPI) {
 
       switch (cmd) {
         case "on":
-          state.mode = "append";
+          state.mode = saved.mode = "append";
           break;
         case "off":
-          state.mode = "off";
+          state.mode = saved.mode = "off";
           break;
         case "min": {
           const n = parseInt(rest, 10);
           if (Number.isFinite(n) && n >= 0) {
-            minChars = n;
+            minChars = saved.min = n;
           } else {
             ui.notify(`Invalid min length: ${rest || "(empty)"}. Use a non-negative number.`, "warn");
             return;
@@ -322,19 +346,19 @@ export default function claudish(pi: ExtensionAPI) {
         }
         case "style":
           if (isStyle(rest)) {
-            state.style = rest;
+            state.style = saved.style = rest;
           } else if (!rest) {
-            state.style = "default";
+            state.style = saved.style = "default";
           } else {
             ui.notify(`Unknown style: ${rest}. Use tldr, 5y, caveman, or default.`, "warn");
             return;
           }
           break;
         case "language":
-          state.language = rest;
+          state.language = saved.language = rest;
           break;
         case "model":
-          state.modelSpec = rest;
+          state.modelSpec = saved.model = rest;
           break;
         case "last": {
           if (lastSources.length === 0) {
@@ -405,11 +429,10 @@ export default function claudish(pi: ExtensionAPI) {
           return;
         }
         case "reset":
-          state.mode = "append";
-          state.style = "default";
-          state.language = "";
-          state.modelSpec = "";
+          // Back to what a fresh session without a settings file starts with.
+          Object.assign(state, defaultState);
           minChars = defaultMinChars;
+          saved = {};
           break;
         default: {
           const models = ctx && typeof ctx === "object" && "models" in ctx
@@ -428,6 +451,16 @@ export default function claudish(pi: ExtensionAPI) {
           ui.notify(lines.join("\n"), "info");
           return;
         }
+      }
+
+      // Only setting changes reach this point; every other case returns.
+      try {
+        await writeSaved(saved);
+      } catch (error: unknown) {
+        ui.notify(
+          `claudish: could not save settings to ${settingsPath()}: ${error instanceof Error ? error.message : String(error)}. The change applies to this session only.`,
+          "warn",
+        );
       }
 
       ui.notify(
@@ -686,6 +719,42 @@ export default function claudish(pi: ExtensionAPI) {
     add(models.current?.() ?? models.list?.()?.[0]);
     return out;
   }
+}
+
+// ── Saved settings ───────────────────────────────────────────────────────
+
+/** Resolved per call: the agent dir follows the active OMP profile. */
+function settingsPath(): string {
+  return path.join(getAgentDir(), SETTINGS_FILE);
+}
+
+/** Saved settings. A missing, unreadable, or malformed file — or key — is ignored. */
+function loadSaved(): Saved {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const out: Saved = {};
+  if (isMode(r.mode)) out.mode = r.mode;
+  if (isStyle(r.style)) out.style = r.style;
+  if (typeof r.language === "string") out.language = r.language;
+  if (typeof r.model === "string") out.model = r.model;
+  if (typeof r.min === "number" && Number.isInteger(r.min) && r.min >= 0) out.min = r.min;
+  return out;
+}
+
+/** Writes `s`; with nothing left to keep, removes the file instead. */
+async function writeSaved(s: Saved): Promise<void> {
+  const file = settingsPath();
+  if (Object.keys(s).length === 0) {
+    await fs.promises.rm(file, { force: true });
+    return;
+  }
+  await Bun.write(file, JSON.stringify(s, null, 2) + "\n");
 }
 
 // ── Type guards ──────────────────────────────────────────────────────────
